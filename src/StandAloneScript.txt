@@ -1,0 +1,136 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace ConsoleApplication3
+{
+    class Program
+    {
+	
+public static void Main()
+		{
+           PerformBulkCopy();
+		}
+
+private static void PerformBulkCopy()
+        {           
+            var dwhServer = "@Model.DestinationServer" ;
+            var erpServer = "@Model.SourceServer" ;
+            var erpDb = "@Model.SourceDb" ;
+            var dwhDb = "@Model.DestinationDb" ;
+            string sourcConnectionString = string.Format(@@"Server={0};Database={1};Trusted_Connection=true;Connection Timeout=900",new[]{erpServer,erpDb});
+            string destConnectionString = string.Format(@@"Server={0};Database={1};Trusted_Connection=true;Connection Timeout=900",new[]{dwhServer,dwhDb});
+
+			DateTime offsetDate;
+            string sqlFormattedDate;
+
+            using (var sqlConnection1 = new SqlConnection(destConnectionString))
+            {
+                var cmd1 = new SqlCommand
+                {
+                    CommandText = string.Format(@@"Merge into HlpNextOffsets mt 
+using
+(values('CUSTTABLE-BUFFER_CUSTTABLE')) t(NextDeltaOffset) on
+mt.FromTo = '@Model.SourceTable-@Model.TargetTable'
+when not matched then insert
+(FromTo,NextDeltaOffset) values
+( '@Model.SourceTable-@Model.TargetTable','1900-01-01');"),
+                    CommandType = CommandType.Text,
+                    Connection = sqlConnection1
+                };
+                sqlConnection1.Open();
+                cmd1.ExecuteNonQuery();
+
+				 var cmd2 = new SqlCommand
+                {
+                    CommandText = "Truncate Table @Model.TargetTable",
+                    CommandType = CommandType.Text,
+                    Connection = sqlConnection1
+                };                
+                cmd2.ExecuteNonQuery();
+
+
+                var cmd = new SqlCommand { CommandText = string.Format(@@"SELECT CONVERT(datetime,NextDeltaOffset) FROM HlpNextOffsets where FromTo='{0}'", "@Model.SourceTable-@Model.TargetTable"), CommandType = CommandType.Text, Connection = sqlConnection1 };               
+                var reader = cmd.ExecuteReader();
+                reader.Read();
+                offsetDate = reader.GetDateTime(0);
+                sqlFormattedDate = offsetDate.ToString("yyyy-MM-dd HH:mm:ss");
+                sqlConnection1.Close();
+            }
+
+
+            // get the source data
+            using (SqlConnection sourceConnection = new SqlConnection(sourcConnectionString))
+            {
+                SqlCommand myCommand = new SqlCommand("SELECT  @String.Join(",", Model.Keys),@String.Join(",", Model.Attributes) FROM @Model.SourceTable where @Model.DeltaHandle >'"+sqlFormattedDate+"'", sourceConnection);
+				myCommand.CommandTimeout = 0;
+                sourceConnection.Open();
+                SqlDataReader reader = myCommand.ExecuteReader();
+
+                // open the destination data
+                using (SqlConnection destinationConnection = new SqlConnection(destConnectionString))
+                {
+                    // open the connection
+                    destinationConnection.Open();
+
+                    using (SqlBulkCopy bulkCopy = new SqlBulkCopy(destinationConnection.ConnectionString))
+                    {
+                        bulkCopy.BatchSize = 500;
+						bulkCopy.BulkCopyTimeout = 1800;
+
+						@foreach (string s in @Model.Keys) {							
+							@:bulkCopy.ColumnMappings.Add("[@s]", "[@s]");
+						}
+						@foreach (string s in @Model.Attributes) {
+							@:bulkCopy.ColumnMappings.Add("[@s]", "[@s]");
+						}
+                     
+                        bulkCopy.NotifyAfter = 1000;
+                        //bulkCopy.SqlRowsCopied +=new SqlRowsCopiedEventHandler(
+                        bulkCopy.DestinationTableName = "@Model.TargetTable";
+                        bulkCopy.WriteToServer(reader);
+                    }
+                }
+                reader.Close();
+            }
+
+			using (var sqlConnection1 = new SqlConnection(destConnectionString))
+            {
+			   sqlConnection1.Open();
+				var cmd = new SqlCommand { 
+					CommandText = "Select max(@Model.DeltaHandle)  from @Model.TargetTable" , 
+					CommandType = CommandType.Text, 
+					Connection = sqlConnection1,
+					CommandTimeout = 0
+				};
+                var reader = cmd.ExecuteReader();
+                if(reader.Read()){
+					// no entries in buffer table cause an sqlnullexception, thus check for null first
+					if (!reader.IsDBNull(0))
+					{
+						offsetDate = reader.GetDateTime(0);
+						sqlFormattedDate = offsetDate.ToString("yyyy-MM-dd HH:mm:ss");
+						reader.Close();
+						var cmd1 = new SqlCommand
+						{
+							CommandText = "Update  HlpNextOffsets set NextDeltaOffset='"+ sqlFormattedDate +"'  where FromTo='@Model.SourceTable-@Model.TargetTable'",
+							CommandType = CommandType.Text,
+							Connection = sqlConnection1
+						};
+                
+						cmd1.ExecuteNonQuery();
+					}
+					else
+					{
+						reader.Close();
+					}
+				}
+                sqlConnection1.Close();
+            }
+        }
+		}
+		}

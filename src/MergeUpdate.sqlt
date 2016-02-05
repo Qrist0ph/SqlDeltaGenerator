@@ -1,0 +1,56 @@
+Declare @@CurrentRequest int;
+Set @@CurrentRequest = (Select isnull(max(Request),0)+1 from HlpRequestLog where FromTo = '@Model.SourceTable-@Model.TargetTable');
+
+Insert into HlpRequestLog (FromTo, Request,StartTime) values ('@Model.SourceTable-@Model.TargetTable',@@CurrentRequest,GetDate());
+
+with SourceTableCte as (
+Select @String.Join(",", Model.Keys),@String.Join(",", Model.Attributes) from @Model.SourceTable)
+
+merge into @Model.TargetTable as MyTarget
+using SourceTableCte on
+
+@{bool firstLoop = true;}
+@foreach (string s in @Model.Keys) {
+	@(firstLoop ? "" : "AND") @:MyTarget.@s = SourceTableCte.@s
+	firstLoop = false;
+}
+AND MyTarget._MostRecentRecord  = 1
+when matched AND
+-- Falls ein geaenderter Record reinkommt
+SourceTableCte.@Model.DeltaHandle > MyTarget.@Model.DeltaHandle
+
+THEN UPDATE 
+SET 
+_ModifiedRequest = @@CurrentRequest,
+
+
+@Model.MergeMatched
+
+-- Falls der Business Key zum ersten Mal auftritt
+when not matched then INSERT
+(
+ @String.Join(",", Model.Keys)
+ ,@String.Join(",", Model.Attributes),
+
+_CreatedRequest,
+_ModifiedRequest,
+_MostRecentRecord
+
+)
+values(
+@foreach (string s in @Model.Keys) {
+	 @: SourceTableCte.@s ,
+}
+@foreach (string s in @Model.Attributes) {
+	 @: SourceTableCte.@s ,
+}
+
+@@CurrentRequest,
+@@CurrentRequest,
+1
+);
+
+Update HlpRequestLog set EndTime = GetDate() where Request = @@CurrentRequest
+
+
+
